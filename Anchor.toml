@@ -1,0 +1,20 @@
+[toolchain]
+package_manager = "yarn"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+open_lotto = "BBHqQciHkSwjB1fjyyB7ic17Phg9kHBeLPPUDyBPP5k4"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+deploy-localnet = "anchor deploy --program-name open-lotto --provider.cluster localnet --program-keypair ./keys/open_lotto-localnet-keypair.json"
