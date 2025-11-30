@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-declare_id!("AM6H3UJCbJ4BFYWZUHksigfQrsfx214orfrWFt5J3zEz");
+declare_id!("GMECsoFXBjDcsA7GuVUq1vFmCM27qJumw4Y1rGsxseui");
 
 pub fn transfer<'a>(
     system_program: AccountInfo<'a>,
@@ -209,6 +209,7 @@ pub struct DrawLottery<'info> {
     pub authority: Signer<'info>,
     /// CHECK: The account's data is validated manually within the handler.
     pub randomness_account_data: AccountInfo<'info>,
+    /// CHECK: This is a PDA escrow account holding SOL for wagers.
     #[account(mut, seeds = [b"stateEscrow".as_ref()], bump)]
     pub escrow_account: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
