@@ -190,22 +190,50 @@ mod test {
 
 
         // drawing the lottery
-        // creating random number
+        // creating mock Switchboard randomness account
         let mut rng = thread_rng();
         let randomness_pubkey = Pubkey::new_unique();
-        let escrow_account = Pubkey::new_unique();
-        let random_bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
-        let randomness_pubkey = Pubkey::new_unique();
+
+        // Build a valid RandomnessAccountData structure
+        // Discriminator: [10, 66, 229, 135, 220, 239, 217, 114]
+        let mut randomness_data: Vec<u8> = vec![];
+        // 8-byte discriminator
+        randomness_data.extend_from_slice(&[10, 66, 229, 135, 220, 239, 217, 114]);
+        // authority: Pubkey (32 bytes)
+        randomness_data.extend_from_slice(&[0u8; 32]);
+        // queue: Pubkey (32 bytes)
+        randomness_data.extend_from_slice(&[0u8; 32]);
+        // seed_slothash: [u8; 32]
+        randomness_data.extend_from_slice(&[0u8; 32]);
+        // seed_slot: u64 - must be clock.slot - 1 for draw_lottery check
+        randomness_data.extend_from_slice(&1u64.to_le_bytes());
+        // oracle: Pubkey (32 bytes)
+        randomness_data.extend_from_slice(&[0u8; 32]);
+        // reveal_slot: u64 - needs to match clock.slot for get_value to work
+        randomness_data.extend_from_slice(&2u64.to_le_bytes());
+        // value: [u8; 32] - the random value
+        let random_value: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+        randomness_data.extend_from_slice(&random_value);
+        // _ebuf2: [u8; 96]
+        randomness_data.extend_from_slice(&[0u8; 96]);
+        // _ebuf1: [u8; 128]
+        randomness_data.extend_from_slice(&[0u8; 128]);
+
+        // Switchboard program ID (devnet)
+        let switchboard_pid = Pubkey::try_from("SBondMDrcV3K4kxZR1HNVT7osZxAHVHgYXL5Ze1oMUv").unwrap();
         let randomness_account = SolanaAccount {
             lamports: 1_000_000,
-            data: random_bytes.clone(),
-            owner: Pubkey::new_unique(), // or your program_id if needed
+            data: randomness_data,
+            owner: switchboard_pid,
             executable: false,
             rent_epoch: 0,
         };
         svm.set_account(randomness_pubkey, randomness_account);
+
+        // Update clock: slot=2 so seed_slot (0) < clock.slot and reveal_slot (2) == clock.slot
         let fake_clock = Clock {
-            unix_timestamp: fake_clock.unix_timestamp + 10, // <-- simulate current time
+            slot: 2,
+            unix_timestamp: fake_clock.unix_timestamp + 10,
             ..fake_clock.clone()
         };
         svm.set_sysvar(&fake_clock);
@@ -213,15 +241,21 @@ mod test {
         let data = DrawLottery{
             randomness_account : randomness_pubkey
         }.data();
+        let (escrow_account, _) = Pubkey::find_program_address(&[b"stateEscrow"], &program_id);
         let accounts = vec![
-            AccountMeta::new(user.pubkey(), true),
-            AccountMeta::new(randomness_pubkey, false),
+            AccountMeta::new(current_pot_address, false),
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(randomness_pubkey, false),
             AccountMeta::new(escrow_account, false),
+            AccountMeta::new_readonly(system_program::ID, false),
         ];
         let ix = Instruction::new_with_bytes(program_id, &data, accounts);
         let message = Message::new(&[ix], Some(&payer.pubkey()));
-        let tx = Transaction::new(&[&user], message, svm.latest_blockhash());
+        let tx = Transaction::new(&[&payer], message, svm.latest_blockhash());
         let result = svm.send_transaction(tx);
+        if result.is_err() {
+            println!("DrawLottery error: {:?}", result);
+        }
         assert!(result.is_ok());
 
     }
