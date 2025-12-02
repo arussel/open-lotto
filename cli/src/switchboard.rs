@@ -6,15 +6,14 @@
 use anyhow::{anyhow, Result};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
+    address_lookup_table,
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    system_instruction,
     system_program,
     sysvar,
     transaction::Transaction,
-    address_lookup_table,
 };
 use spl_associated_token_account::get_associated_token_address;
 use std::str::FromStr;
@@ -48,14 +47,27 @@ pub struct CommitResult {
 
 /// Get Switchboard program ID based on network
 pub fn get_sb_program_id(is_devnet: bool) -> Result<Pubkey> {
-    let pid_str = if is_devnet { SB_ON_DEMAND_PID_DEVNET } else { SB_ON_DEMAND_PID_MAINNET };
+    let pid_str = if is_devnet {
+        SB_ON_DEMAND_PID_DEVNET
+    } else {
+        SB_ON_DEMAND_PID_MAINNET
+    };
     Pubkey::from_str(pid_str).map_err(|e| anyhow!("Invalid program ID: {}", e))
 }
 
 /// Get Switchboard queue based on network
 pub fn get_sb_queue(is_devnet: bool) -> Result<Pubkey> {
-    let queue_str = if is_devnet { SB_QUEUE_DEVNET } else { SB_QUEUE_MAINNET };
+    let queue_str = if is_devnet {
+        SB_QUEUE_DEVNET
+    } else {
+        SB_QUEUE_MAINNET
+    };
     Pubkey::from_str(queue_str).map_err(|e| anyhow!("Invalid queue address: {}", e))
+}
+
+/// Detect if the RPC URL points to devnet
+fn is_devnet_url(rpc_url: &str) -> bool {
+    rpc_url.contains("devnet")
 }
 
 /// Create a new randomness account and commit to randomness
@@ -63,12 +75,15 @@ pub async fn create_and_commit_randomness(
     rpc_client: &RpcClient,
     payer: &Keypair,
     randomness_keypair: &Keypair,
+    rpc_url: &str,
 ) -> Result<CommitResult> {
     // Determine network from RPC URL
-    let is_devnet = true; // For now, assume devnet
+    let is_devnet = is_devnet_url(rpc_url);
 
     let sb_program_id = get_sb_program_id(is_devnet)?;
     let queue = get_sb_queue(is_devnet)?;
+
+    println!("Network: {}", if is_devnet { "devnet" } else { "mainnet" });
 
     println!("Using Switchboard program: {}", sb_program_id);
     println!("Using queue: {}", queue);
@@ -93,11 +108,7 @@ pub async fn create_and_commit_randomness(
     // Build and send init transaction
     let recent_blockhash = rpc_client.get_latest_blockhash()?;
     let message = Message::new(&[init_ix], Some(&payer.pubkey()));
-    let transaction = Transaction::new(
-        &[payer, randomness_keypair],
-        message,
-        recent_blockhash,
-    );
+    let transaction = Transaction::new(&[payer, randomness_keypair], message, recent_blockhash);
 
     println!("Sending randomnessInit transaction...");
     let init_signature = rpc_client.send_and_confirm_transaction(&transaction)?;
@@ -126,7 +137,10 @@ pub async fn create_and_commit_randomness(
 
         match rpc_client.send_and_confirm_transaction(&transaction) {
             Ok(sig) => {
-                println!("Commit transaction succeeded with oracle {}: {}", oracle, sig);
+                println!(
+                    "Commit transaction succeeded with oracle {}: {}",
+                    oracle, sig
+                );
                 commit_signature = Some(sig.to_string());
                 break;
             }
@@ -144,7 +158,8 @@ pub async fn create_and_commit_randomness(
         }
     }
 
-    let signature = commit_signature.ok_or_else(|| anyhow!("All oracles failed to commit randomness"))?;
+    let signature =
+        commit_signature.ok_or_else(|| anyhow!("All oracles failed to commit randomness"))?;
 
     Ok(CommitResult {
         randomness_account: randomness_keypair.pubkey(),
@@ -190,18 +205,21 @@ fn get_oracles_from_queue(rpc_client: &RpcClient, queue: &Pubkey) -> Result<Vec<
     // mr_enclaves_len: 4 -> offset 5200, end 5204
     // oracle_keys_len: 4 -> offset 5204, end 5208
 
-    const ORACLE_KEYS_OFFSET: usize = 1064;  // 8 + 32 + 1024
+    const ORACLE_KEYS_OFFSET: usize = 1064; // 8 + 32 + 1024
     const ORACLE_KEYS_LEN_OFFSET: usize = 5204;
 
     if queue_data.len() < ORACLE_KEYS_LEN_OFFSET + 4 {
-        return Err(anyhow!("Queue account data too short: {} bytes", queue_data.len()));
+        return Err(anyhow!(
+            "Queue account data too short: {} bytes",
+            queue_data.len()
+        ));
     }
 
     // Read oracle_keys_len (u32)
     let oracle_keys_len = u32::from_le_bytes(
         queue_data[ORACLE_KEYS_LEN_OFFSET..ORACLE_KEYS_LEN_OFFSET + 4]
             .try_into()
-            .map_err(|_| anyhow!("Failed to read oracle_keys_len"))?
+            .map_err(|_| anyhow!("Failed to read oracle_keys_len"))?,
     ) as usize;
 
     println!("Queue has {} active oracles", oracle_keys_len);
@@ -221,7 +239,8 @@ fn get_oracles_from_queue(rpc_client: &RpcClient, queue: &Pubkey) -> Result<Vec<
             continue;
         }
 
-        let oracle_bytes: [u8; 32] = match queue_data[oracle_offset..oracle_offset + 32].try_into() {
+        let oracle_bytes: [u8; 32] = match queue_data[oracle_offset..oracle_offset + 32].try_into()
+        {
             Ok(b) => b,
             Err(_) => continue,
         };
@@ -240,7 +259,7 @@ fn get_oracles_from_queue(rpc_client: &RpcClient, queue: &Pubkey) -> Result<Vec<
                     continue;
                 }
                 oracles.push(oracle);
-            },
+            }
             Err(_) => continue,
         }
     }
@@ -266,16 +285,11 @@ fn build_randomness_init_instruction(
     let associated_token_program = Pubkey::from_str(SPL_ASSOCIATED_TOKEN_PROGRAM)?;
 
     // Program state PDA
-    let (program_state, _) = Pubkey::find_program_address(
-        &[b"STATE"],
-        program_id,
-    );
+    let (program_state, _) = Pubkey::find_program_address(&[b"STATE"], program_id);
 
     // LUT signer PDA
-    let (lut_signer, _) = Pubkey::find_program_address(
-        &[b"LutSigner", randomness_account.as_ref()],
-        program_id,
-    );
+    let (lut_signer, _) =
+        Pubkey::find_program_address(&[b"LutSigner", randomness_account.as_ref()], program_id);
 
     // Reward escrow - ATA for randomness account to hold wrapped SOL
     let reward_escrow = get_associated_token_address(randomness_account, &wrapped_sol_mint);
@@ -317,27 +331,33 @@ fn build_randomness_init_instruction(
     println!("  4. payer: {}", payer);
     println!("  5. system_program: {}", system_program::id());
     println!("  6. token_program: {}", token_program);
-    println!("  7. associated_token_program: {}", associated_token_program);
+    println!(
+        "  7. associated_token_program: {}",
+        associated_token_program
+    );
     println!("  8. wrapped_sol_mint: {}", wrapped_sol_mint);
     println!("  9. program_state: {}", program_state);
     println!(" 10. lut_signer: {}", lut_signer);
     println!(" 11. lut: {}", lut);
-    println!(" 12. address_lookup_table_program: {}", address_lookup_table::program::id());
+    println!(
+        " 12. address_lookup_table_program: {}",
+        address_lookup_table::program::id()
+    );
     println!("  Instruction data (hex): {}", hex::encode(&data));
 
     let accounts = vec![
-        AccountMeta::new(*randomness_account, true),        // 0. randomness (signer, writable)
-        AccountMeta::new(reward_escrow, false),             // 1. reward_escrow (writable)
-        AccountMeta::new_readonly(*payer, true),            // 2. authority (signer)
-        AccountMeta::new(*queue, false),                    // 3. queue (writable)
-        AccountMeta::new(*payer, true),                     // 4. payer (signer, writable)
-        AccountMeta::new_readonly(system_program::id(), false),  // 5. system_program
-        AccountMeta::new_readonly(token_program, false),    // 6. token_program
+        AccountMeta::new(*randomness_account, true), // 0. randomness (signer, writable)
+        AccountMeta::new(reward_escrow, false),      // 1. reward_escrow (writable)
+        AccountMeta::new_readonly(*payer, true),     // 2. authority (signer)
+        AccountMeta::new(*queue, false),             // 3. queue (writable)
+        AccountMeta::new(*payer, true),              // 4. payer (signer, writable)
+        AccountMeta::new_readonly(system_program::id(), false), // 5. system_program
+        AccountMeta::new_readonly(token_program, false), // 6. token_program
         AccountMeta::new_readonly(associated_token_program, false), // 7. associated_token_program
         AccountMeta::new_readonly(wrapped_sol_mint, false), // 8. wrapped_sol_mint
-        AccountMeta::new_readonly(program_state, false),    // 9. program_state
-        AccountMeta::new_readonly(lut_signer, false),       // 10. lut_signer
-        AccountMeta::new(lut, false),                       // 11. lut (writable)
+        AccountMeta::new_readonly(program_state, false), // 9. program_state
+        AccountMeta::new_readonly(lut_signer, false), // 10. lut_signer
+        AccountMeta::new(lut, false),                // 11. lut (writable)
         AccountMeta::new_readonly(address_lookup_table::program::id(), false), // 12. address_lookup_table_program
     ];
 
@@ -373,11 +393,11 @@ fn build_randomness_commit_instruction(
     println!("  4. authority: {}", authority);
 
     let accounts = vec![
-        AccountMeta::new(*randomness_account, false),           // 0. randomness (writable)
-        AccountMeta::new_readonly(*queue, false),               // 1. queue
-        AccountMeta::new(*oracle, false),                       // 2. oracle (writable)
+        AccountMeta::new(*randomness_account, false), // 0. randomness (writable)
+        AccountMeta::new_readonly(*queue, false),     // 1. queue
+        AccountMeta::new(*oracle, false),             // 2. oracle (writable)
         AccountMeta::new_readonly(sysvar::slot_hashes::id(), false), // 3. recent_slothashes
-        AccountMeta::new_readonly(*authority, true),            // 4. authority (signer)
+        AccountMeta::new_readonly(*authority, true),  // 4. authority (signer)
     ];
 
     Ok(Instruction::new_with_bytes(*program_id, &data, accounts))
@@ -451,7 +471,10 @@ fn check_if_revealed(rpc_client: &RpcClient, randomness_account: &Pubkey) -> Res
 }
 
 /// Check the status of a randomness account
-pub fn check_randomness_status(rpc_client: &RpcClient, randomness_account: &Pubkey) -> Result<String> {
+pub fn check_randomness_status(
+    rpc_client: &RpcClient,
+    randomness_account: &Pubkey,
+) -> Result<String> {
     let account = match rpc_client.get_account(randomness_account) {
         Ok(acc) => acc,
         Err(_) => return Ok("Account not found".to_string()),
@@ -462,7 +485,10 @@ pub fn check_randomness_status(rpc_client: &RpcClient, randomness_account: &Pubk
     let sb_mainnet = get_sb_program_id(false)?;
 
     if account.owner != sb_devnet && account.owner != sb_mainnet {
-        return Ok(format!("Account is not owned by Switchboard program (owner: {})", account.owner));
+        return Ok(format!(
+            "Account is not owned by Switchboard program (owner: {})",
+            account.owner
+        ));
     }
 
     // Parse basic info from the account
@@ -491,7 +517,7 @@ pub fn check_randomness_status(rpc_client: &RpcClient, randomness_account: &Pubk
     let reveal_slot = u64::from_le_bytes(
         account.data[reveal_slot_offset..reveal_slot_offset + 8]
             .try_into()
-            .unwrap_or([0u8; 8])
+            .unwrap_or([0u8; 8]),
     );
 
     // Parse seed_slot (offset: 8 + 32 + 32 + 32 = 104)
@@ -499,13 +525,19 @@ pub fn check_randomness_status(rpc_client: &RpcClient, randomness_account: &Pubk
     let seed_slot = u64::from_le_bytes(
         account.data[seed_slot_offset..seed_slot_offset + 8]
             .try_into()
-            .unwrap_or([0u8; 8])
+            .unwrap_or([0u8; 8]),
     );
 
     if reveal_slot > 0 {
-        Ok(format!("Revealed at slot {} (seed slot: {}) - randomness value is available", reveal_slot, seed_slot))
+        Ok(format!(
+            "Revealed at slot {} (seed slot: {}) - randomness value is available",
+            reveal_slot, seed_slot
+        ))
     } else if seed_slot > 0 {
-        Ok(format!("Committed at slot {} - waiting for oracle to reveal", seed_slot))
+        Ok(format!(
+            "Committed at slot {} - waiting for oracle to reveal",
+            seed_slot
+        ))
     } else {
         Ok("Initialized - not yet committed".to_string())
     }

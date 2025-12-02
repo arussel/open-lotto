@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use borsh::{BorshDeserialize, BorshSerialize};
 use clap::{Parser, Subcommand};
+use solana_cli_config::{Config as SolanaConfig, CONFIG_FILE};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
@@ -24,13 +25,13 @@ const OPEN_LOTTO_PID: &str = "GMECsoFXBjDcsA7GuVUq1vFmCM27qJumw4Y1rGsxseui";
 #[command(name = "open-lotto")]
 #[command(about = "CLI for Open Lotto lottery program", long_about = None)]
 struct Cli {
-    /// Solana RPC URL
-    #[arg(long, default_value = "https://api.devnet.solana.com")]
-    rpc_url: String,
+    /// Solana RPC URL (defaults to Solana CLI config)
+    #[arg(long, short = 'u')]
+    rpc_url: Option<String>,
 
-    /// Path to keypair file
-    #[arg(long, default_value = "~/.config/solana/id.json")]
-    keypair: String,
+    /// Path to keypair file (defaults to Solana CLI config)
+    #[arg(long, short = 'k')]
+    keypair: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -104,12 +105,23 @@ fn load_keypair(path: &str) -> Result<Keypair> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Load Solana CLI config for defaults
+    let config_file = CONFIG_FILE.as_ref()
+        .ok_or_else(|| anyhow!("Unable to get Solana config file path"))?;
+    let solana_config = SolanaConfig::load(config_file)
+        .map_err(|e| anyhow!("Failed to load Solana config: {}", e))?;
+
+    let rpc_url = cli.rpc_url.unwrap_or(solana_config.json_rpc_url);
+    let keypair_path = cli.keypair.unwrap_or(solana_config.keypair_path);
+
+    println!("Using RPC: {}", rpc_url);
+
     let rpc_client = RpcClient::new_with_commitment(
-        cli.rpc_url.clone(),
+        rpc_url.clone(),
         CommitmentConfig::confirmed(),
     );
 
-    let payer = load_keypair(&cli.keypair)?;
+    let payer = load_keypair(&keypair_path)?;
     println!("Using wallet: {}", payer.pubkey());
 
     match cli.command {
@@ -145,6 +157,7 @@ async fn main() -> Result<()> {
                 &rpc_client,
                 &payer,
                 &randomness_keypair,
+                &rpc_url,
             ).await?;
 
             println!("\n✓ Randomness account created and committed!");
@@ -165,6 +178,7 @@ async fn main() -> Result<()> {
                 &rpc_client,
                 &payer,
                 &randomness_keypair,
+                &rpc_url,
             ).await?;
 
             println!("Randomness committed at slot: {}", commit_result.commit_slot);
@@ -221,6 +235,7 @@ async fn main() -> Result<()> {
                 &rpc_client,
                 &payer,
                 &randomness_keypair,
+                &rpc_url,
             ).await?;
 
             println!("Randomness committed at slot: {}", commit_result.commit_slot);
