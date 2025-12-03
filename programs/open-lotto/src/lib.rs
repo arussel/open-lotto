@@ -39,8 +39,8 @@ pub mod open_lotto {
     use anchor_lang::system_program;
     use switchboard_on_demand::RandomnessAccountData;
 
-    const POT_AMOUNT: u64 = 9_500_000;
-    const FEE: u64 = 500_000;
+    const POT_AMOUNT: u64 = 9_000_000;
+    const FEE: u64 = 1_000_000;
     const WAGER: u64 = 100;
 
     pub fn init_pot_manager(

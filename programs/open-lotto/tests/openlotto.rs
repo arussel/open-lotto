@@ -183,10 +183,10 @@ mod test {
         assert!(result.is_ok());
 
         let treasury_balance = svm.get_balance(&treasury).unwrap();
-        assert_eq!(treasury_balance, 500_000 + rent_treasury);
+        assert_eq!(treasury_balance, 1_000_000 + rent_treasury);
 
         let pot_balance = svm.get_balance(&current_pot_address).unwrap();
-        assert_eq!(pot_balance, 9_500_000 + rent_pot);
+        assert_eq!(pot_balance, 9_000_000 + rent_pot);
 
 
         // drawing the lottery

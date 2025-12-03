@@ -102,9 +102,6 @@ pub async fn create_and_commit_randomness(
         recent_slot,
     )?;
 
-    // Get current slot before transaction
-    let slot = recent_slot;
-
     // Build and send init transaction
     let recent_blockhash = rpc_client.get_latest_blockhash()?;
     let message = Message::new(&[init_ix], Some(&payer.pubkey()));
@@ -163,7 +160,7 @@ pub async fn create_and_commit_randomness(
 
     Ok(CommitResult {
         randomness_account: randomness_keypair.pubkey(),
-        commit_slot: slot,
+        commit_slot: recent_slot,
         signature: signature.to_string(),
     })
 }
