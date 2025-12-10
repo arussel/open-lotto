@@ -175,6 +175,93 @@ pub mod open_lotto {
 
         Ok(())
     }
+
+    // ============ Admin Close Instructions ============
+
+    pub fn close_pot(ctx: Context<ClosePot>) -> Result<()> {
+        // Rent is returned to authority automatically via close constraint
+        Ok(())
+    }
+
+    pub fn close_pot_manager(ctx: Context<ClosePotManager>) -> Result<()> {
+        // Rent is returned to authority automatically via close constraint
+        Ok(())
+    }
+
+    pub fn close_ticket(ctx: Context<CloseTicket>) -> Result<()> {
+        // Rent is returned to authority automatically via close constraint
+        Ok(())
+    }
+
+    /// Force close any program-owned account (for cleaning up legacy accounts)
+    /// Only works for accounts owned by this program
+    pub fn force_close_account(ctx: Context<ForceCloseAccount>) -> Result<()> {
+        let account = &ctx.accounts.account;
+        let authority = &ctx.accounts.authority;
+
+        // Transfer all lamports to authority
+        let lamports = account.lamports();
+        **account.try_borrow_mut_lamports()? = 0;
+        **authority.try_borrow_mut_lamports()? = authority.lamports().checked_add(lamports).unwrap();
+
+        // Zero out the account data
+        let mut data = account.try_borrow_mut_data()?;
+        for byte in data.iter_mut() {
+            *byte = 0;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct ClosePot<'info> {
+    #[account(
+        mut,
+        close = authority
+    )]
+    pub pot: Account<'info, Pot>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ClosePotManager<'info> {
+    #[account(
+        mut,
+        close = authority,
+        has_one = authority
+    )]
+    pub pot_manager: Account<'info, PotManager>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseTicket<'info> {
+    #[account(
+        mut,
+        close = authority
+    )]
+    pub ticket: Account<'info, Ticket>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ForceCloseAccount<'info> {
+    /// CHECK: Any account owned by this program - we validate ownership via constraint
+    #[account(
+        mut,
+        owner = crate::ID
+    )]
+    pub account: AccountInfo<'info>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
 }
 
 #[derive(Accounts)]

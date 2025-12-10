@@ -33,6 +33,6 @@ borsh = "1.5"
 base64 = "0.21"
 
 # SPL
-spl-associated-token-account = "6"
-spl-token = "8"
+spl-associated-token-account = { version = "6", features = ["no-entrypoint"] }
+spl-token = { version = "8", features = ["no-entrypoint"] }
 hex = "0.4"

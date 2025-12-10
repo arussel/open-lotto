@@ -14,11 +14,12 @@ cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 
 
 [dependencies]
 anchor-lang = {  version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.32.1", features = ["token"] }
 strum = "0.27"
 strum_macros = "0.27"
 switchboard-on-demand = "0.10.1"
@@ -34,3 +35,4 @@ solana-signer = "2"
 solana-pubkey = "2"
 solana-account = "2"
 litesvm = "0.7"
+spl-token = "8"

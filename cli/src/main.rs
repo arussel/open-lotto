@@ -98,6 +98,23 @@ enum Commands {
         #[arg(long)]
         oracle: Option<String>,
     },
+
+    /// Close a pot account and recover rent
+    ClosePot {
+        /// Pot account public key
+        #[arg(long)]
+        pot: String,
+    },
+
+    /// List all program accounts (pots, pot managers, tickets)
+    ListAccounts,
+
+    /// Force close a program-owned account (for cleaning up legacy accounts)
+    ForceClose {
+        /// Account public key to close
+        #[arg(long)]
+        account: String,
+    },
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -326,6 +343,93 @@ async fn main() -> Result<()> {
             println!("\n✓ Randomness revealed!");
             println!("Transaction: {}", signature);
         }
+
+        Commands::ClosePot { pot } => {
+            let pot_pubkey = Pubkey::from_str(&pot)
+                .context("Invalid pot public key")?;
+
+            let signature = call_close_pot(&rpc_client, &payer, &pot_pubkey)?;
+            println!("\n✓ Pot account closed!");
+            println!("Transaction: {}", signature);
+            println!("Rent recovered to: {}", payer.pubkey());
+        }
+
+        Commands::ListAccounts => {
+            let program_id = Pubkey::from_str(OPEN_LOTTO_PID)?;
+
+            println!("Fetching all program accounts...\n");
+
+            let accounts = rpc_client.get_program_accounts(&program_id)?;
+
+            if accounts.is_empty() {
+                println!("No accounts found for program {}", program_id);
+            } else {
+                // Categorize accounts by discriminator
+                let mut pots = Vec::new();
+                let mut pot_managers = Vec::new();
+                let mut tickets = Vec::new();
+                let mut unknown = Vec::new();
+
+                for (pubkey, account) in &accounts {
+                    if account.data.len() >= 8 {
+                        let disc = &account.data[0..8];
+                        match disc {
+                            // Pot discriminator
+                            [238, 118, 60, 175, 178, 191, 59, 58] => pots.push((pubkey, account)),
+                            // PotManager discriminator
+                            [184, 109, 148, 80, 4, 87, 136, 85] => pot_managers.push((pubkey, account)),
+                            // Ticket discriminator
+                            [41, 228, 24, 165, 78, 90, 235, 200] => tickets.push((pubkey, account)),
+                            _ => unknown.push((pubkey, account)),
+                        }
+                    } else {
+                        unknown.push((pubkey, account));
+                    }
+                }
+
+                println!("=== Pot Managers ({}) ===", pot_managers.len());
+                for (pubkey, account) in &pot_managers {
+                    let lamports = account.lamports;
+                    let name = parse_pot_manager_name(&account.data).unwrap_or_else(|_| "unknown".to_string());
+                    println!("  {} (name: {}, {} lamports)", pubkey, name, lamports);
+                }
+
+                println!("\n=== Pots ({}) ===", pots.len());
+                for (pubkey, account) in &pots {
+                    let lamports = account.lamports;
+                    let (participants, end_ts) = parse_pot_info(&account.data).unwrap_or((0, 0));
+                    println!("  {} (participants: {}, end_ts: {}, {} lamports)", pubkey, participants, end_ts, lamports);
+                }
+
+                println!("\n=== Tickets ({}) ===", tickets.len());
+                for (pubkey, account) in &tickets {
+                    let lamports = account.lamports;
+                    println!("  {} ({} lamports)", pubkey, lamports);
+                }
+
+                if !unknown.is_empty() {
+                    println!("\n=== Unknown ({}) ===", unknown.len());
+                    for (pubkey, account) in &unknown {
+                        println!("  {} ({} lamports, {} bytes)", pubkey, account.lamports, account.data.len());
+                    }
+                }
+
+                println!("\n=== Summary ===");
+                let total_lamports: u64 = accounts.iter().map(|(_, a)| a.lamports).sum();
+                println!("Total accounts: {}", accounts.len());
+                println!("Total lamports: {} ({:.4} SOL)", total_lamports, total_lamports as f64 / 1_000_000_000.0);
+            }
+        }
+
+        Commands::ForceClose { account } => {
+            let account_pubkey = Pubkey::from_str(&account)
+                .context("Invalid account public key")?;
+
+            let signature = call_force_close_account(&rpc_client, &payer, &account_pubkey)?;
+            println!("\n✓ Account force closed!");
+            println!("Transaction: {}", signature);
+            println!("Rent recovered to: {}", payer.pubkey());
+        }
     }
 
     Ok(())
@@ -352,12 +456,19 @@ fn read_oracle_from_randomness(data: &[u8]) -> Result<Pubkey> {
 
 /// Read the randomness_account field from a Pot account's data
 fn read_pot_randomness_account(data: &[u8]) -> Result<Pubkey> {
-    // Pot layout: discriminator(8) + total_participants(8) + start_ts(8) + end_ts(8) + winning_slot(8) + randomness_account(32)
-    if data.len() < 8 + 8 + 8 + 8 + 8 + 32 {
+    // Pot layout (new):
+    // - discriminator: 8 bytes
+    // - pot_manager: 32 bytes
+    // - total_participants: 8 bytes
+    // - start_ts: 8 bytes
+    // - end_ts: 8 bytes
+    // - winning_slot: 8 bytes
+    // - randomness_account: 32 bytes
+    const RANDOMNESS_OFFSET: usize = 8 + 32 + 8 + 8 + 8 + 8;
+    if data.len() < RANDOMNESS_OFFSET + 32 {
         return Err(anyhow!("Pot account data too short"));
     }
-    let offset = 8 + 8 + 8 + 8 + 8; // skip to randomness_account
-    let pubkey_bytes: [u8; 32] = data[offset..offset+32].try_into()?;
+    let pubkey_bytes: [u8; 32] = data[RANDOMNESS_OFFSET..RANDOMNESS_OFFSET + 32].try_into()?;
     Ok(Pubkey::from(pubkey_bytes))
 }
 
@@ -527,4 +638,108 @@ fn get_anchor_discriminator(name: &str) -> [u8; 8] {
     let mut discriminator = [0u8; 8];
     discriminator.copy_from_slice(&hash_bytes[..8]);
     discriminator
+}
+
+/// Call the close_pot instruction on the Open Lotto program
+fn call_close_pot(
+    rpc_client: &RpcClient,
+    payer: &Keypair,
+    pot: &Pubkey,
+) -> Result<String> {
+    let program_id = Pubkey::from_str(OPEN_LOTTO_PID)?;
+
+    let discriminator = get_anchor_discriminator("close_pot");
+    let data = discriminator.to_vec();
+
+    // ClosePot accounts: pot, authority (signer)
+    let accounts = vec![
+        AccountMeta::new(*pot, false),
+        AccountMeta::new(payer.pubkey(), true),
+    ];
+
+    let instruction = Instruction::new_with_bytes(program_id, &data, accounts);
+
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new(&[instruction], Some(&payer.pubkey()));
+    let transaction = Transaction::new(&[payer], message, recent_blockhash);
+
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+    Ok(signature.to_string())
+}
+
+/// Parse pot manager name from account data
+fn parse_pot_manager_name(data: &[u8]) -> Result<String> {
+    // PotManager layout:
+    // - discriminator: 8 bytes
+    // - authority: 32 bytes
+    // - treasury: 32 bytes
+    // - token_mint: 32 bytes
+    // - rent: 8 bytes
+    // - last_random_number: 8 bytes
+    // - timestamps: 16 bytes (two u64s)
+    // - bump: 1 byte
+    // - name: 4 bytes length + string
+    const NAME_OFFSET: usize = 8 + 32 + 32 + 32 + 8 + 8 + 16 + 1;
+
+    if data.len() < NAME_OFFSET + 4 {
+        return Err(anyhow!("PotManager data too short"));
+    }
+
+    let name_len = u32::from_le_bytes(data[NAME_OFFSET..NAME_OFFSET + 4].try_into()?) as usize;
+    if data.len() < NAME_OFFSET + 4 + name_len {
+        return Err(anyhow!("PotManager name data incomplete"));
+    }
+
+    let name_bytes = &data[NAME_OFFSET + 4..NAME_OFFSET + 4 + name_len];
+    String::from_utf8(name_bytes.to_vec()).map_err(|e| anyhow!("Invalid name UTF-8: {}", e))
+}
+
+/// Parse pot info (participants, end_ts) from account data
+fn parse_pot_info(data: &[u8]) -> Result<(u64, u64)> {
+    // Pot layout (new):
+    // - discriminator: 8 bytes
+    // - pot_manager: 32 bytes
+    // - total_participants: 8 bytes
+    // - start_timestamp: 8 bytes
+    // - end_timestamp: 8 bytes
+    // - winning_slot: 8 bytes
+    // - randomness_account: 32 bytes
+    const PARTICIPANTS_OFFSET: usize = 8 + 32;
+    const END_TS_OFFSET: usize = 8 + 32 + 8 + 8;
+
+    if data.len() < END_TS_OFFSET + 8 {
+        return Err(anyhow!("Pot data too short"));
+    }
+
+    let participants = u64::from_le_bytes(data[PARTICIPANTS_OFFSET..PARTICIPANTS_OFFSET + 8].try_into()?);
+    let end_ts = u64::from_le_bytes(data[END_TS_OFFSET..END_TS_OFFSET + 8].try_into()?);
+
+    Ok((participants, end_ts))
+}
+
+/// Call the force_close_account instruction on the Open Lotto program
+fn call_force_close_account(
+    rpc_client: &RpcClient,
+    payer: &Keypair,
+    account: &Pubkey,
+) -> Result<String> {
+    let program_id = Pubkey::from_str(OPEN_LOTTO_PID)?;
+
+    let discriminator = get_anchor_discriminator("force_close_account");
+    let data = discriminator.to_vec();
+
+    // ForceCloseAccount accounts: account, authority (signer)
+    let accounts = vec![
+        AccountMeta::new(*account, false),
+        AccountMeta::new(payer.pubkey(), true),
+    ];
+
+    let instruction = Instruction::new_with_bytes(program_id, &data, accounts);
+
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new(&[instruction], Some(&payer.pubkey()));
+    let transaction = Transaction::new(&[payer], message, recent_blockhash);
+
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+    Ok(signature.to_string())
 }
