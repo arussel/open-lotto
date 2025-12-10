@@ -1,47 +1,18 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("GMECsoFXBjDcsA7GuVUq1vFmCM27qJumw4Y1rGsxseui");
-
-pub fn transfer<'a>(
-    system_program: AccountInfo<'a>,
-    from: AccountInfo<'a>,
-    to: AccountInfo<'a>,
-    amount: u64,
-    seeds: Option<&[&[&[u8]]]>, // Use Option to explicitly handle the presence or absence of seeds
-) -> Result<()> {
-    let amount_needed = amount;
-    if amount_needed > from.lamports() {
-        msg!(
-            "Need {} lamports, but only have {}",
-            amount_needed,
-            from.lamports()
-        );
-        return Err(ErrorCode::NotEnoughFundsToPlay.into());
-    }
-
-    let transfer_accounts = anchor_lang::system_program::Transfer {
-        from: from.to_account_info(),
-        to: to.to_account_info(),
-    };
-
-    let transfer_ctx = match seeds {
-        Some(seeds) => CpiContext::new_with_signer(system_program, transfer_accounts, seeds),
-        None => CpiContext::new(system_program, transfer_accounts),
-    };
-
-    anchor_lang::system_program::transfer(transfer_ctx, amount)
-}
+declare_id!("FVzki74o5zsTDK1ShhQ6EyR3m2ft7HRgeSkCiEsE8aDf");
 
 #[program]
 pub mod open_lotto {
     use super::*;
     use anchor_lang::solana_program::program::set_return_data;
-    use anchor_lang::system_program;
     use switchboard_on_demand::RandomnessAccountData;
 
-    const POT_AMOUNT: u64 = 9_000_000;
-    const FEE: u64 = 1_000_000;
-    const WAGER: u64 = 100;
+    // Token amounts (using smallest token unit, e.g., 6 decimals = 1 token = 1_000_000)
+    const POT_AMOUNT: u64 = 9_000_000; // 9 tokens to prize pool
+    const FEE: u64 = 1_000_000;        // 1 token to treasury
+    const WAGER: u64 = 100;            // Oracle wager
 
     pub fn init_pot_manager(
         ctx: Context<InitPotManager>,
@@ -50,12 +21,13 @@ pub mod open_lotto {
         manager_name: String,
     ) -> Result<()> {
         let now = Clock::get()?.unix_timestamp as u64;
-        if (end_ts < now) {
+        if end_ts < now {
             return Err(ErrorCode::EndTimestampPassed.into());
         }
 
         let next_timestamp = end_ts + pot_duration;
         let pot_manager = &mut ctx.accounts.pot_manager;
+        let pot_manager_key = pot_manager.key();
 
         pot_manager.timestamps = (end_ts, next_timestamp);
 
@@ -63,48 +35,56 @@ pub mod open_lotto {
         pot_manager.bump = ctx.bumps.pot_manager;
 
         // initialize state
-        pot_manager.treasury = ctx.accounts.treasury.key();
+        pot_manager.treasury = ctx.accounts.treasury_token_account.key();
+        pot_manager.token_mint = ctx.accounts.token_mint.key();
         pot_manager.last_random_number = 0;
         pot_manager.rent = ctx.accounts.rent.minimum_balance(PotManager::space());
+        pot_manager.name = manager_name;
 
-        // initialize pots
+        // initialize pots with reference to pot manager
+        ctx.accounts.first_pot.pot_manager = pot_manager_key;
         ctx.accounts.first_pot.start_timestamp = now;
         ctx.accounts.first_pot.end_timestamp = end_ts;
         ctx.accounts.first_pot.total_participants = 0;
+        ctx.accounts.next_pot.pot_manager = pot_manager_key;
         ctx.accounts.next_pot.start_timestamp = end_ts + 1;
         ctx.accounts.next_pot.end_timestamp = end_ts + pot_duration;
         ctx.accounts.next_pot.total_participants = 0;
 
-        //store authority
+        // store authority
         pot_manager.authority = ctx.accounts.authority.key();
         Ok(())
     }
 
     pub fn enter_ticket(ctx: Context<EnterLottery>) -> Result<()> {
-        if (ctx.accounts.pot.end_timestamp < Clock::get()?.unix_timestamp as u64) {
+        if ctx.accounts.pot.end_timestamp < Clock::get()?.unix_timestamp as u64 {
             return Err(ErrorCode::PotClosed.into());
         }
         ctx.accounts.ticket.index = ctx.accounts.pot.total_participants;
         ctx.accounts.ticket.participant = ctx.accounts.user.key();
         ctx.accounts.pot.total_participants += 1;
 
-        system_program::transfer(
+        // Transfer tokens to escrow (prize pool)
+        token::transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.user.to_account_info(),
-                    to: ctx.accounts.pot.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.escrow_token_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
                 },
             ),
             POT_AMOUNT,
         )?;
 
-        system_program::transfer(
+        // Transfer fee tokens to treasury
+        token::transfer(
             CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.user.to_account_info(),
-                    to: ctx.accounts.treasury.to_account_info(),
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.treasury_token_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
                 },
             ),
             FEE,
@@ -117,19 +97,23 @@ pub mod open_lotto {
         let clock = Clock::get()?;
         let randomness_data =
             RandomnessAccountData::parse(ctx.accounts.randomness_account_data.data.borrow())
-                .unwrap();
+                .map_err(|_| ErrorCode::RandomnessNotResolved)?;
         if randomness_data.seed_slot != clock.slot - 1 {
             msg!("seed_slot: {}", randomness_data.seed_slot);
             msg!("slot: {}", clock.slot);
             return Err(ErrorCode::RandomnessAlreadyRevealed.into());
         }
 
-        transfer(
-            ctx.accounts.system_program.to_account_info(),
-            ctx.accounts.authority.to_account_info(),
-            ctx.accounts.escrow_account.to_account_info(),
+        // Transfer SOL wager for oracle (this stays as SOL)
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.authority.to_account_info(),
+                    to: ctx.accounts.wager_escrow.to_account_info(),
+                },
+            ),
             WAGER,
-            None,
         )?;
 
         ctx.accounts.pot.randomness_account = randomness_account;
@@ -141,17 +125,21 @@ pub mod open_lotto {
         let clock = Clock::get()?;
         let pot = &mut ctx.accounts.pot;
 
-        if (ctx.accounts.randomness_account_data.key() != pot.randomness_account) {
+        if ctx.accounts.randomness_account_data.key() != pot.randomness_account {
             return Err(ErrorCode::InvalidRandomnessAccount.into());
         }
 
         let randomness_data =
             RandomnessAccountData::parse(ctx.accounts.randomness_account_data.data.borrow())
-                .unwrap();
+                .map_err(|_| ErrorCode::RandomnessNotResolved)?;
         let revealed_random_value = randomness_data
             .get_value(clock.slot)
             .map_err(|_| ErrorCode::RandomnessNotResolved)?;
-        let number = u64::from_le_bytes(revealed_random_value[0..8].try_into().unwrap());
+        let number = u64::from_le_bytes(
+            revealed_random_value[0..8]
+                .try_into()
+                .map_err(|_| ErrorCode::RandomnessNotResolved)?,
+        );
         let winner = number % pot.total_participants;
         pot.winning_slot = winner;
         set_return_data(&winner.to_le_bytes());
@@ -159,19 +147,32 @@ pub mod open_lotto {
     }
 
     pub fn claim_prize(ctx: Context<ClaimPrize>) -> Result<()> {
-        if (ctx.accounts.ticket.index != ctx.accounts.pot.winning_slot) {
+        if ctx.accounts.ticket.index != ctx.accounts.pot.winning_slot {
             return Err(ErrorCode::TicketAccountNotWinning.into());
         }
-        if(ctx.accounts.ticket.participant != ctx.accounts.winner.key()){
+        if ctx.accounts.ticket.participant != ctx.accounts.winner.key() {
             return Err(ErrorCode::TicketAccountNotWinning.into());
         }
-        transfer(
-            ctx.accounts.system_program.to_account_info(),
-            ctx.accounts.pot.to_account_info(),
-            ctx.accounts.winner.to_account_info(),
-            ctx.accounts.pot.total_participants * POT_AMOUNT,
-            None,
+
+        let prize_amount = ctx.accounts.pot.total_participants * POT_AMOUNT;
+
+        // Transfer tokens from escrow to winner using PDA signer
+        let escrow_seeds = &[b"escrow".as_ref(), &[ctx.bumps.escrow_token_account]];
+        let signer_seeds = &[&escrow_seeds[..]];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.winner_token_account.to_account_info(),
+                    authority: ctx.accounts.escrow_token_account.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            prize_amount,
         )?;
+
         Ok(())
     }
 }
@@ -180,12 +181,33 @@ pub mod open_lotto {
 pub struct ClaimPrize<'info> {
     #[account(mut)]
     pub ticket: Account<'info, Ticket>,
-    #[account(mut)]
-    pub winner: Account<'info, Ticket>,
+
+    /// CHECK: Winner's wallet - validated via ticket.participant
+    pub winner: AccountInfo<'info>,
+
     #[account(mut)]
     pub pot: Account<'info, Pot>,
-    pub authority: Signer<'info>,
-    pub system_program: Program<'info, System>,
+
+    /// Escrow token account holding prize pool
+    #[account(
+        mut,
+        seeds = [b"escrow"],
+        bump,
+        token::mint = token_mint,
+        token::authority = escrow_token_account,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// Winner's token account to receive prize
+    #[account(
+        mut,
+        token::mint = token_mint,
+        token::authority = winner,
+    )]
+    pub winner_token_account: Account<'info, TokenAccount>,
+
+    pub token_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
@@ -194,11 +216,7 @@ pub struct SettleLottery<'info> {
     pub pot: Account<'info, Pot>,
     /// CHECK: The account's data is validated manually within the handler.
     pub randomness_account_data: AccountInfo<'info>,
-    /// CHECK: This is a simple Solana account holding SOL.
-    #[account(mut, seeds = [b"stateEscrow".as_ref()], bump )]
-    pub escrow_account: AccountInfo<'info>,
     pub user: Signer<'info>,
-    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -209,9 +227,9 @@ pub struct DrawLottery<'info> {
     pub authority: Signer<'info>,
     /// CHECK: The account's data is validated manually within the handler.
     pub randomness_account_data: AccountInfo<'info>,
-    /// CHECK: This is a PDA escrow account holding SOL for wagers.
-    #[account(mut, seeds = [b"stateEscrow".as_ref()], bump)]
-    pub escrow_account: AccountInfo<'info>,
+    /// CHECK: This is a PDA escrow account holding SOL for oracle wagers.
+    #[account(mut, seeds = [b"wagerEscrow".as_ref()], bump)]
+    pub wager_escrow: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -225,19 +243,43 @@ pub struct EnterLottery<'info> {
     pub pot: Account<'info, Pot>,
 
     #[account(
-      init,
-      payer = user,
-      space = Ticket::space(),
-      seeds = [b"ticket", pot.key().as_ref(), &pot.total_participants.to_le_bytes()],
-      bump
+        init,
+        payer = user,
+        space = Ticket::space(),
+        seeds = [b"ticket", pot.key().as_ref(), &pot.total_participants.to_le_bytes()],
+        bump
     )]
     pub ticket: Account<'info, Ticket>,
 
-    /// CHECK: This account is a lamports-only pot created by the program.
-    /// No data or ownership checks are needed.
-    #[account(mut)]
-    pub treasury: UncheckedAccount<'info>,
+    /// User's token account to pay from
+    #[account(
+        mut,
+        token::mint = token_mint,
+        token::authority = user,
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
 
+    /// Escrow token account for prize pool
+    #[account(
+        mut,
+        seeds = [b"escrow"],
+        bump,
+        token::mint = token_mint,
+        token::authority = escrow_token_account,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// Treasury token account for fees
+    #[account(
+        mut,
+        seeds = [b"treasury"],
+        bump,
+        token::mint = token_mint,
+    )]
+    pub treasury_token_account: Account<'info, TokenAccount>,
+
+    pub token_mint: Account<'info, Mint>,
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
@@ -245,48 +287,62 @@ pub struct EnterLottery<'info> {
 #[instruction(end_ts: u64, pot_duration: u64, manager_name: String)]
 pub struct InitPotManager<'info> {
     #[account(
-      init,
-      payer = authority,
-      space = PotManager::space(),
-      seeds = [b"manager", authority.key().as_ref(), manager_name.as_bytes()],
-      bump
+        init,
+        payer = authority,
+        space = PotManager::space(),
+        seeds = [b"manager", authority.key().as_ref(), manager_name.as_bytes()],
+        bump
     )]
     pub pot_manager: Account<'info, PotManager>,
 
-    /// CHECK: This account is a lamports-only pot created by the program.
-    /// No data or ownership checks are needed.
+    /// The SPL token mint for the lottery
+    pub token_mint: Account<'info, Mint>,
+
+    /// Treasury token account to collect fees
     #[account(
-      init,
-      payer = authority,
-      space = 0,
-      seeds = [b"treasury", authority.key().as_ref()],
-      bump
+        init,
+        payer = authority,
+        seeds = [b"treasury"],
+        bump,
+        token::mint = token_mint,
+        token::authority = authority,
     )]
-    pub treasury: UncheckedAccount<'info>,
+    pub treasury_token_account: Account<'info, TokenAccount>,
+
+    /// Escrow token account to hold prize pool
+    #[account(
+        init,
+        payer = authority,
+        seeds = [b"escrow"],
+        bump,
+        token::mint = token_mint,
+        token::authority = escrow_token_account,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
     #[account(
-      init,
-      payer = authority,
-      space = Pot::space(),
-      seeds = [
-        b"pot",
-        pot_manager.key().as_ref(),
-        &end_ts.to_le_bytes(),
-      ],
-      bump
+        init,
+        payer = authority,
+        space = Pot::space(),
+        seeds = [
+            b"pot",
+            pot_manager.key().as_ref(),
+            &end_ts.to_le_bytes(),
+        ],
+        bump
     )]
     pub first_pot: Account<'info, Pot>,
 
     #[account(
-      init,
-      payer = authority,
-      space = Pot::space(),
-      seeds = [
-        b"pot",
-        pot_manager.key().as_ref(),
-        &(end_ts + pot_duration).to_le_bytes(),
-      ],
-      bump
+        init,
+        payer = authority,
+        space = Pot::space(),
+        seeds = [
+            b"pot",
+            pot_manager.key().as_ref(),
+            &(end_ts + pot_duration).to_le_bytes(),
+        ],
+        bump
     )]
     pub next_pot: Account<'info, Pot>,
 
@@ -294,7 +350,7 @@ pub struct InitPotManager<'info> {
     pub authority: Signer<'info>,
 
     pub system_program: Program<'info, System>,
-
+    pub token_program: Program<'info, Token>,
     pub rent: Sysvar<'info, Rent>,
 }
 
@@ -303,28 +359,34 @@ pub struct InitPotManager<'info> {
 pub struct PotManager {
     pub authority: Pubkey,
     pub treasury: Pubkey,
+    pub token_mint: Pubkey,
     pub rent: u64,
     pub last_random_number: u64,
     pub timestamps: (u64, u64),
     pub bump: u8,
+    pub name: String, // Max 32 bytes (PDA seed limit)
 }
 
 impl PotManager {
+    pub const MAX_NAME_LEN: usize = 32;
+
     pub fn space() -> usize {
-        8 + //discriminator
-        32 +// authority
-        32 +// pot
-        32 +// treasury
-        8 + //rent
-        8 + // last_random_numbers
-        8 + // pot end timestamp
-        1 // bump
+        8 +  // discriminator
+        32 + // authority
+        32 + // treasury
+        32 + // token_mint
+        8 +  // rent
+        8 +  // last_random_number
+        16 + // timestamps (u64, u64)
+        1 +  // bump
+        4 + Self::MAX_NAME_LEN // name (4 bytes for string length prefix + max content)
     }
 }
 
 // address: program-id + "pot" + pot end timestamp`
 #[account]
 pub struct Pot {
+    pub pot_manager: Pubkey, // Reference to parent PotManager
     pub total_participants: u64,
     pub start_timestamp: u64,
     pub end_timestamp: u64,
@@ -334,12 +396,13 @@ pub struct Pot {
 
 impl Pot {
     pub fn space() -> usize {
-        8 + // discriminator
-        8 + // total_participants
-        8 + // start_ts
-        8 + // end_ts
-        8 + // winning_slot
-        32 //randomness_account
+        8 +  // discriminator
+        32 + // pot_manager
+        8 +  // total_participants
+        8 +  // start_ts
+        8 +  // end_ts
+        8 +  // winning_slot
+        32   // randomness_account
     }
 }
 

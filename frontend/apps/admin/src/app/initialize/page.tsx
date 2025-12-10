@@ -6,11 +6,13 @@ import { PublicKey } from "@solana/web3.js";
 import { OpenLottoClient } from "@open-lotto/sdk";
 import BN from "bn.js";
 
+const MAX_LOTTERY_NAME_BYTES = 32;
+
 export default function InitializePage() {
   const { publicKey, signTransaction, signAllTransactions } = useWallet();
   const { connection } = useConnection();
 
-  const [managerName, setManagerName] = useState("default");
+  const [lotteryName, setLotteryName] = useState("default");
   const [tokenMint, setTokenMint] = useState("");
   const [durationHours, setDurationHours] = useState("24");
   const [endInMinutes, setEndInMinutes] = useState("5");
@@ -21,6 +23,9 @@ export default function InitializePage() {
     txId?: string;
   } | null>(null);
 
+  const lotteryNameBytes = new TextEncoder().encode(lotteryName).length;
+  const isNameTooLong = lotteryNameBytes > MAX_LOTTERY_NAME_BYTES;
+
   const handleInitialize = async () => {
     if (!publicKey || !signTransaction || !signAllTransactions) {
       setResult({ success: false, message: "Wallet not connected" });
@@ -29,6 +34,16 @@ export default function InitializePage() {
 
     if (!tokenMint) {
       setResult({ success: false, message: "Token mint address is required" });
+      return;
+    }
+
+    if (isNameTooLong) {
+      setResult({ success: false, message: `Lottery name exceeds ${MAX_LOTTERY_NAME_BYTES} bytes` });
+      return;
+    }
+
+    if (!lotteryName.trim()) {
+      setResult({ success: false, message: "Lottery name is required" });
       return;
     }
 
@@ -49,7 +64,7 @@ export default function InitializePage() {
       });
 
       const txId = await client.initPotManager({
-        managerName,
+        managerName: lotteryName,
         tokenMint: tokenMintPubkey,
         endTimestamp: new BN(endTimestamp),
         potDuration: new BN(durationSeconds),
@@ -99,18 +114,30 @@ export default function InitializePage() {
         <div className="space-y-6">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-2">
-              Manager Name
+              Lottery Name
             </label>
             <input
               type="text"
-              value={managerName}
-              onChange={(e) => setManagerName(e.target.value)}
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              value={lotteryName}
+              onChange={(e) => setLotteryName(e.target.value)}
+              className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 ${
+                isNameTooLong ? "border-red-500 bg-red-50" : "border-slate-300"
+              }`}
               placeholder="default"
             />
-            <p className="text-sm text-slate-500 mt-1">
-              Unique identifier for this lottery instance
-            </p>
+            <div className="flex justify-between mt-1">
+              <p className="text-sm text-slate-500">
+                Unique identifier for this lottery instance
+              </p>
+              <p className={`text-sm ${isNameTooLong ? "text-red-600 font-medium" : "text-slate-400"}`}>
+                {lotteryNameBytes}/{MAX_LOTTERY_NAME_BYTES} bytes
+              </p>
+            </div>
+            {isNameTooLong && (
+              <p className="text-sm text-red-600 mt-1">
+                Name exceeds maximum length of {MAX_LOTTERY_NAME_BYTES} bytes
+              </p>
+            )}
           </div>
 
           <div>
@@ -181,10 +208,10 @@ export default function InitializePage() {
 
           <button
             onClick={handleInitialize}
-            disabled={loading}
+            disabled={loading || isNameTooLong}
             className="w-full bg-primary-600 hover:bg-primary-700 text-white font-medium py-3 px-4 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? "Initializing..." : "Initialize Pot Manager"}
+            {loading ? "Initializing..." : "Initialize Lottery"}
           </button>
         </div>
       </div>

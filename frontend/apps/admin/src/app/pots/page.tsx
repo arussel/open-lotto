@@ -2,37 +2,61 @@
 
 import { useEffect, useState } from "react";
 import { useConnection } from "@solana/wallet-adapter-react";
-import { OpenLottoClient, PotWithAddress } from "@open-lotto/sdk";
+import { OpenLottoClient, PotWithAddress, PotManagerWithAddress } from "@open-lotto/sdk";
 import { getPotStatus, PotStatus } from "@open-lotto/types";
 import { shortenAddress } from "@open-lotto/utils";
 import Link from "next/link";
 
+interface LotteryGroup {
+  manager: PotManagerWithAddress;
+  pots: PotWithAddress[];
+}
+
 export default function PotsPage() {
   const { connection } = useConnection();
-  const [pots, setPots] = useState<PotWithAddress[]>([]);
+  const [lotteryGroups, setLotteryGroups] = useState<LotteryGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<PotStatus | "all">("all");
+  const [selectedLottery, setSelectedLottery] = useState<string | "all">("all");
 
   useEffect(() => {
     if (!connection) return;
 
-    const fetchPots = async () => {
+    const fetchData = async () => {
       try {
         const client = new OpenLottoClient({ connection, network: "devnet" });
-        const allPots = await client.getAllPots();
-        setPots(allPots);
+        const [managers, allPots] = await Promise.all([
+          client.getAllPotManagers(),
+          client.getAllPots(),
+        ]);
+
+        // Group pots by their pot manager
+        const groups: LotteryGroup[] = managers.map((manager) => ({
+          manager,
+          pots: allPots.filter((pot) => pot.potManager.equals(manager.address)),
+        }));
+
+        setLotteryGroups(groups);
       } catch (error) {
-        console.error("Error fetching pots:", error);
+        console.error("Error fetching data:", error);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchPots();
+    fetchData();
   }, [connection]);
 
-  const filteredPots =
-    filter === "all" ? pots : pots.filter((p) => getPotStatus(p) === filter);
+  // Flatten and filter pots based on selected lottery and status
+  const filteredPots = lotteryGroups
+    .filter((group) => selectedLottery === "all" || group.manager.address.toBase58() === selectedLottery)
+    .flatMap((group) =>
+      group.pots.map((pot) => ({
+        ...pot,
+        lotteryName: group.manager.name
+      }))
+    )
+    .filter((pot) => filter === "all" || getPotStatus(pot) === filter);
 
   const statusColors: Record<PotStatus, string> = {
     [PotStatus.Active]: "bg-green-100 text-green-800",
@@ -52,40 +76,85 @@ export default function PotsPage() {
           href="/initialize"
           className="bg-primary-600 hover:bg-primary-700 text-white font-medium py-2 px-4 rounded-lg transition-colors"
         >
-          New Pot
+          New Lottery
         </Link>
       </div>
 
       <div className="bg-white rounded-xl shadow-sm">
-        <div className="p-4 border-b border-slate-200">
-          <div className="flex gap-2">
-            {["all", ...Object.values(PotStatus)].map((status) => (
+        <div className="p-4 border-b border-slate-200 space-y-4">
+          {/* Lottery Filter */}
+          <div>
+            <label className="text-sm font-medium text-slate-600 mb-2 block">
+              Filter by Lottery
+            </label>
+            <div className="flex gap-2 flex-wrap">
               <button
-                key={status}
-                onClick={() => setFilter(status as PotStatus | "all")}
+                onClick={() => setSelectedLottery("all")}
                 className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  filter === status
+                  selectedLottery === "all"
                     ? "bg-primary-600 text-white"
                     : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                 }`}
               >
-                {status === "all" ? "All" : status}
+                All Lotteries
               </button>
-            ))}
+              {lotteryGroups.map((group) => (
+                <button
+                  key={group.manager.address.toBase58()}
+                  onClick={() => setSelectedLottery(group.manager.address.toBase58())}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    selectedLottery === group.manager.address.toBase58()
+                      ? "bg-primary-600 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  {group.manager.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Status Filter */}
+          <div>
+            <label className="text-sm font-medium text-slate-600 mb-2 block">
+              Filter by Status
+            </label>
+            <div className="flex gap-2">
+              {["all", ...Object.values(PotStatus)].map((status) => (
+                <button
+                  key={status}
+                  onClick={() => setFilter(status as PotStatus | "all")}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    filter === status
+                      ? "bg-primary-600 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  {status === "all" ? "All" : status}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
         {loading ? (
           <div className="p-8 text-center text-slate-500">Loading...</div>
+        ) : lotteryGroups.length === 0 ? (
+          <div className="p-8 text-center text-slate-500">
+            No lotteries found. Create one to get started.
+          </div>
         ) : filteredPots.length === 0 ? (
           <div className="p-8 text-center text-slate-500">
-            No pots found. Create one to get started.
+            No pots match the current filters.
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-slate-200">
+                  <th className="text-left py-4 px-6 text-slate-500 font-medium">
+                    Lottery
+                  </th>
                   <th className="text-left py-4 px-6 text-slate-500 font-medium">
                     Address
                   </th>
@@ -94,9 +163,6 @@ export default function PotsPage() {
                   </th>
                   <th className="text-left py-4 px-6 text-slate-500 font-medium">
                     Participants
-                  </th>
-                  <th className="text-left py-4 px-6 text-slate-500 font-medium">
-                    Start Time
                   </th>
                   <th className="text-left py-4 px-6 text-slate-500 font-medium">
                     End Time
@@ -117,6 +183,11 @@ export default function PotsPage() {
                       key={pot.address.toBase58()}
                       className="border-b border-slate-100 hover:bg-slate-50"
                     >
+                      <td className="py-4 px-6">
+                        <span className="px-2 py-1 bg-slate-100 rounded text-sm font-medium text-slate-700">
+                          {pot.lotteryName}
+                        </span>
+                      </td>
                       <td className="py-4 px-6 font-mono text-sm">
                         <a
                           href={`https://explorer.solana.com/address/${pot.address.toBase58()}?cluster=devnet`}
@@ -136,11 +207,6 @@ export default function PotsPage() {
                       </td>
                       <td className="py-4 px-6">
                         {pot.totalParticipants.toString()}
-                      </td>
-                      <td className="py-4 px-6 text-sm text-slate-500">
-                        {new Date(
-                          pot.startTimestamp.toNumber() * 1000
-                        ).toLocaleString()}
                       </td>
                       <td className="py-4 px-6 text-sm text-slate-500">
                         {new Date(

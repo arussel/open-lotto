@@ -13,6 +13,8 @@ import {
   createAssociatedTokenAccountInstruction,
 } from "@solana/spl-token";
 import BN from "bn.js";
+import bs58 from "bs58";
+import { sha256 } from "js-sha256";
 import {
   PROGRAM_ID,
   SEEDS,
@@ -68,6 +70,10 @@ export interface PotWithAddress extends Pot {
 }
 
 export interface TicketWithAddress extends Ticket {
+  address: PublicKey;
+}
+
+export interface PotManagerWithAddress extends PotManager {
   address: PublicKey;
 }
 
@@ -288,7 +294,6 @@ export class OpenLottoClient {
   }
 
   async getAllPots(): Promise<PotWithAddress[]> {
-    const bs58 = require("bs58");
     const accounts = await this.connection.getProgramAccounts(PROGRAM_ID, {
       filters: [
         {
@@ -315,7 +320,6 @@ export class OpenLottoClient {
   }
 
   async getUserTickets(user: PublicKey): Promise<TicketWithAddress[]> {
-    const bs58 = require("bs58");
     const accounts = await this.connection.getProgramAccounts(PROGRAM_ID, {
       filters: [
         {
@@ -351,6 +355,38 @@ export class OpenLottoClient {
     if (!ticket) return null;
 
     return { ...ticket, address: ticketAddress };
+  }
+
+  async getPotManager(address: PublicKey): Promise<PotManager | null> {
+    const accountInfo = await this.connection.getAccountInfo(address);
+    if (!accountInfo) return null;
+    return this.parsePotManagerAccount(accountInfo.data);
+  }
+
+  async getAllPotManagers(): Promise<PotManagerWithAddress[]> {
+    const accounts = await this.connection.getProgramAccounts(PROGRAM_ID, {
+      filters: [
+        {
+          memcmp: {
+            offset: 0,
+            bytes: bs58.encode(Buffer.from(DISCRIMINATORS.POT_MANAGER)),
+          },
+        },
+      ],
+    });
+
+    return accounts
+      .map((account) => {
+        const manager = this.parsePotManagerAccount(account.account.data);
+        if (!manager) return null;
+        return { ...manager, address: account.pubkey };
+      })
+      .filter((m): m is PotManagerWithAddress => m !== null);
+  }
+
+  async getPotsForManager(managerAddress: PublicKey): Promise<PotWithAddress[]> {
+    const allPots = await this.getAllPots();
+    return allPots.filter((pot) => pot.potManager.equals(managerAddress));
   }
 
   async getTokenBalance(
@@ -462,12 +498,8 @@ export class OpenLottoClient {
   }
 
   private getDiscriminator(name: string): Buffer {
-    const crypto = require("crypto");
-    const hash = crypto
-      .createHash("sha256")
-      .update(`global:${name}`)
-      .digest();
-    return hash.slice(0, 8);
+    const hash = sha256.array(`global:${name}`);
+    return Buffer.from(hash.slice(0, 8));
   }
 
   private encodeString(str: string): Buffer {
@@ -481,6 +513,9 @@ export class OpenLottoClient {
     try {
       // Skip 8-byte discriminator
       let offset = 8;
+
+      const potManager = new PublicKey(data.slice(offset, offset + 32));
+      offset += 32;
 
       const totalParticipants = new BN(data.slice(offset, offset + 8), "le");
       offset += 8;
@@ -497,6 +532,7 @@ export class OpenLottoClient {
       const randomnessAccount = new PublicKey(data.slice(offset, offset + 32));
 
       return {
+        potManager,
         totalParticipants,
         startTimestamp,
         endTimestamp,
@@ -519,6 +555,54 @@ export class OpenLottoClient {
       const index = new BN(data.slice(offset, offset + 8), "le");
 
       return { participant, index };
+    } catch {
+      return null;
+    }
+  }
+
+  private parsePotManagerAccount(data: Buffer): PotManager | null {
+    try {
+      // Skip 8-byte discriminator
+      let offset = 8;
+
+      const authority = new PublicKey(data.slice(offset, offset + 32));
+      offset += 32;
+
+      const treasury = new PublicKey(data.slice(offset, offset + 32));
+      offset += 32;
+
+      const tokenMint = new PublicKey(data.slice(offset, offset + 32));
+      offset += 32;
+
+      const rent = new BN(data.slice(offset, offset + 8), "le");
+      offset += 8;
+
+      const lastRandomNumber = new BN(data.slice(offset, offset + 8), "le");
+      offset += 8;
+
+      const currentEndTs = new BN(data.slice(offset, offset + 8), "le");
+      offset += 8;
+      const nextEndTs = new BN(data.slice(offset, offset + 8), "le");
+      offset += 8;
+
+      const bump = data[offset];
+      offset += 1;
+
+      // Read string: 4 bytes length prefix + content
+      const nameLen = data.readUInt32LE(offset);
+      offset += 4;
+      const name = data.slice(offset, offset + nameLen).toString("utf8");
+
+      return {
+        authority,
+        treasury,
+        tokenMint,
+        rent,
+        lastRandomNumber,
+        timestamps: [currentEndTs, nextEndTs],
+        bump,
+        name,
+      };
     } catch {
       return null;
     }

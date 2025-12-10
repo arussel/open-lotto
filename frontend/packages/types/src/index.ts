@@ -22,6 +22,7 @@ export const SEEDS = {
 
 // Account Types
 export interface Pot {
+  potManager: PublicKey; // Reference to parent PotManager
   totalParticipants: BN;
   startTimestamp: BN;
   endTimestamp: BN;
@@ -36,10 +37,13 @@ export interface Ticket {
 
 export interface PotManager {
   authority: PublicKey;
+  treasury: PublicKey;
   tokenMint: PublicKey;
-  potDuration: BN;
-  currentPot: PublicKey;
-  nextPot: PublicKey;
+  rent: BN;
+  lastRandomNumber: BN;
+  timestamps: [BN, BN]; // (currentEndTs, nextEndTs)
+  bump: number;
+  name: string;
 }
 
 // Instruction Args
@@ -126,6 +130,7 @@ export function getTimeRemaining(endTimestamp: BN): {
 export const DISCRIMINATORS = {
   POT: Buffer.from([238, 118, 60, 175, 178, 191, 59, 58]),
   TICKET: Buffer.from([41, 228, 24, 165, 78, 90, 235, 200]),
+  POT_MANAGER: Buffer.from([184, 109, 148, 80, 4, 87, 136, 85]),
 } as const;
 
 // Re-export common types
