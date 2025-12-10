@@ -1,0 +1,23 @@
+{
+  "name": "open-lotto-frontend",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean",
+    "dev:admin": "turbo run dev --filter=@open-lotto/admin",
+    "dev:web": "turbo run dev --filter=@open-lotto/web",
+    "dev:mobile": "cd apps/mobile && npx expo start"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0",
+    "typescript": "^5.4.0"
+  },
+  "packageManager": "yarn@1.22.22"
+}

@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 15, 23, 42;
+  --background-rgb: 248, 250, 252;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: rgb(var(--background-rgb));
+}
+
+.wallet-adapter-button {
+  @apply bg-primary-600 hover:bg-primary-700 !important;
+}
+
+.wallet-adapter-modal-wrapper {
+  @apply bg-slate-900 !important;
+}
