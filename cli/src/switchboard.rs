@@ -1,9 +1,10 @@
 //! Switchboard On-Demand randomness operations
 //!
-//! This module handles creating randomness accounts, committing, and checking reveal status
-//! by directly constructing Switchboard program instructions.
+//! This module handles creating randomness accounts, committing, revealing, and checking status
+//! by directly constructing Switchboard program instructions and calling the Gateway API.
 
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     address_lookup_table,
@@ -43,6 +44,24 @@ pub struct CommitResult {
     pub randomness_account: Pubkey,
     pub commit_slot: u64,
     pub signature: String,
+    pub oracle: Pubkey,
+}
+
+/// Response from the Switchboard Gateway API for randomness reveal
+#[derive(Debug, Deserialize)]
+pub struct GatewayRevealResponse {
+    pub signature: String,      // Base64 encoded signature
+    pub recovery_id: u8,        // Recovery ID for secp256k1
+    pub value: [u8; 32],        // The random value
+}
+
+/// Request body for the Gateway API randomness reveal
+#[derive(Debug, Serialize)]
+struct GatewayRevealRequest {
+    slothash: Vec<u8>,          // Slot hash as byte array
+    randomness_key: String,     // Randomness account pubkey as hex
+    slot: u64,                  // The slot number
+    rpc: String,                // RPC URL
 }
 
 /// Get Switchboard program ID based on network
@@ -116,7 +135,7 @@ pub async fn create_and_commit_randomness(
     let oracles = get_oracles_from_queue(rpc_client, &queue)?;
     println!("Found {} oracles in queue, trying each...", oracles.len());
 
-    let mut commit_signature = None;
+    let mut commit_result: Option<(String, Pubkey)> = None;
     for (idx, oracle) in oracles.iter().enumerate() {
         println!("Trying oracle {}/{}: {}", idx + 1, oracles.len(), oracle);
 
@@ -138,7 +157,7 @@ pub async fn create_and_commit_randomness(
                     "Commit transaction succeeded with oracle {}: {}",
                     oracle, sig
                 );
-                commit_signature = Some(sig.to_string());
+                commit_result = Some((sig.to_string(), *oracle));
                 break;
             }
             Err(e) => {
@@ -155,13 +174,14 @@ pub async fn create_and_commit_randomness(
         }
     }
 
-    let signature =
-        commit_signature.ok_or_else(|| anyhow!("All oracles failed to commit randomness"))?;
+    let (signature, oracle) =
+        commit_result.ok_or_else(|| anyhow!("All oracles failed to commit randomness"))?;
 
     Ok(CommitResult {
         randomness_account: randomness_keypair.pubkey(),
         commit_slot: recent_slot,
-        signature: signature.to_string(),
+        signature,
+        oracle,
     })
 }
 
@@ -465,6 +485,230 @@ fn check_if_revealed(rpc_client: &RpcClient, randomness_account: &Pubkey) -> Res
     let is_revealed = reveal_check.iter().any(|&b| b != 0);
 
     Ok(is_revealed)
+}
+
+/// Get the gateway URL from an oracle account
+fn get_oracle_gateway_url(rpc_client: &RpcClient, oracle: &Pubkey) -> Result<String> {
+    let oracle_data = rpc_client.get_account_data(oracle)?;
+
+    // The gateway_uri is stored as a fixed-size field. We search for "https://" prefix
+    // and extract the URL up to the first null byte or end of field.
+    let https_prefix = b"https://";
+
+    // Find the position of "https://"
+    let url_start = oracle_data
+        .windows(https_prefix.len())
+        .position(|window| window == https_prefix)
+        .ok_or_else(|| anyhow!("Could not find gateway URL in oracle account"))?;
+
+    // Find the end of the URL (first null byte or max 256 chars)
+    let max_len = 256.min(oracle_data.len() - url_start);
+    let url_end = url_start
+        + oracle_data[url_start..url_start + max_len]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(max_len);
+
+    let gateway_uri = String::from_utf8(oracle_data[url_start..url_end].to_vec())
+        .map_err(|e| anyhow!("Failed to parse gateway_uri: {}", e))?;
+
+    Ok(gateway_uri)
+}
+
+/// Fetch randomness reveal from the Gateway API
+pub async fn fetch_randomness_reveal(
+    gateway_url: &str,
+    randomness_account: &Pubkey,
+    rpc_url: &str,
+    rpc_client: &RpcClient,
+) -> Result<GatewayRevealResponse> {
+    // Get the slot and slothash from the randomness account
+    let randomness_data = rpc_client.get_account_data(randomness_account)?;
+
+    // Parse seed_slot from randomness account (offset: 8 + 32 + 32 + 32 = 104)
+    let seed_slot_offset = 104;
+    let seed_slot = u64::from_le_bytes(
+        randomness_data[seed_slot_offset..seed_slot_offset + 8]
+            .try_into()
+            .map_err(|_| anyhow!("Failed to read seed_slot"))?,
+    );
+
+    // Parse seed_slothash from randomness account (offset: 8 + 32 + 32 = 72)
+    let slothash_offset = 72;
+    let slothash: [u8; 32] = randomness_data[slothash_offset..slothash_offset + 32]
+        .try_into()
+        .map_err(|_| anyhow!("Failed to read seed_slothash"))?;
+
+    println!("Requesting reveal for slot {} from {}", seed_slot, gateway_url);
+
+    // Build request
+    let request = GatewayRevealRequest {
+        slothash: slothash.to_vec(),
+        randomness_key: hex::encode(randomness_account.to_bytes()),
+        slot: seed_slot,
+        rpc: rpc_url.to_string(),
+    };
+
+    let url = format!("{}/gateway/api/v1/randomness_reveal", gateway_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| anyhow!("Gateway request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Gateway returned error {}: {}", status, body));
+    }
+
+    let reveal_response: GatewayRevealResponse = response
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse gateway response: {}", e))?;
+
+    println!("Gateway reveal response received");
+    println!("  Recovery ID: {}", reveal_response.recovery_id);
+    println!("  Value: 0x{}", hex::encode(&reveal_response.value));
+
+    Ok(reveal_response)
+}
+
+/// Build and send the randomnessReveal instruction
+pub async fn reveal_randomness(
+    rpc_client: &RpcClient,
+    payer: &Keypair,
+    randomness_account: &Pubkey,
+    oracle: &Pubkey,
+    queue: &Pubkey,
+    rpc_url: &str,
+) -> Result<String> {
+    let is_devnet = rpc_url.contains("devnet");
+    let sb_program_id = get_sb_program_id(is_devnet)?;
+
+    // Get the oracle's gateway URL
+    let gateway_url = get_oracle_gateway_url(rpc_client, oracle)?;
+    println!("Oracle gateway URL: {}", gateway_url);
+
+    // Fetch reveal data from gateway
+    let reveal_data = fetch_randomness_reveal(&gateway_url, randomness_account, rpc_url, rpc_client).await?;
+
+    // Build the reveal instruction
+    let reveal_ix = build_randomness_reveal_instruction(
+        &sb_program_id,
+        randomness_account,
+        oracle,
+        queue,
+        &payer.pubkey(),
+        &reveal_data,
+    )?;
+
+    // Send transaction
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new(&[reveal_ix], Some(&payer.pubkey()));
+    let transaction = Transaction::new(&[payer], message, recent_blockhash);
+
+    println!("Sending randomnessReveal transaction...");
+    let signature = rpc_client
+        .send_and_confirm_transaction(&transaction)
+        .map_err(|e| anyhow!("Failed to send reveal transaction: {}", e))?;
+
+    println!("Reveal transaction: {}", signature);
+    Ok(signature.to_string())
+}
+
+/// Build the Switchboard randomnessReveal instruction
+fn build_randomness_reveal_instruction(
+    program_id: &Pubkey,
+    randomness_account: &Pubkey,
+    oracle: &Pubkey,
+    queue: &Pubkey,
+    payer: &Pubkey,
+    reveal_data: &GatewayRevealResponse,
+) -> Result<Instruction> {
+    use base64::Engine;
+
+    let wrapped_sol_mint = Pubkey::from_str(WRAPPED_SOL_MINT)?;
+    let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM)?;
+
+    // Program state PDA
+    let (program_state, _) = Pubkey::find_program_address(&[b"STATE"], program_id);
+
+    // Oracle stats PDA (seed: "OracleRandomnessStats")
+    let (oracle_stats, _) = Pubkey::find_program_address(
+        &[b"OracleRandomnessStats", oracle.as_ref()],
+        program_id,
+    );
+
+    // Reward escrow - ATA for randomness account
+    let reward_escrow = get_associated_token_address(randomness_account, &wrapped_sol_mint);
+
+    // Discriminator for randomness_reveal: [197, 181, 187, 10, 30, 58, 20, 73]
+    let discriminator = get_anchor_discriminator("randomness_reveal");
+
+    // Decode the signature from base64
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&reveal_data.signature)
+        .map_err(|e| anyhow!("Failed to decode signature: {}", e))?;
+
+    // Build instruction data: discriminator + RandomnessRevealParams
+    // RandomnessRevealParams: { signature: [u8; 64], recovery_id: u8, value: [u8; 32] }
+    let mut data = discriminator;
+    data.extend_from_slice(&signature_bytes);  // 64 bytes signature
+    data.push(reveal_data.recovery_id);        // 1 byte recovery_id
+    data.extend_from_slice(&reveal_data.value); // 32 bytes value
+
+    println!("Reveal instruction data size: {} bytes", data.len());
+
+    // Account order from IDL for randomness_reveal (12 accounts total):
+    // 0. randomness (writable)
+    // 1. oracle
+    // 2. queue
+    // 3. stats (OracleRandomnessStats PDA, writable)
+    // 4. authority (signer)
+    // 5. payer (signer, writable)
+    // 6. recent_slothashes
+    // 7. system_program
+    // 8. reward_escrow (writable)
+    // 9. token_program
+    // 10. wrapped_sol_mint
+    // 11. program_state
+
+    println!("Building randomnessReveal with accounts:");
+    println!("  0. randomness: {}", randomness_account);
+    println!("  1. oracle: {}", oracle);
+    println!("  2. queue: {}", queue);
+    println!("  3. stats: {}", oracle_stats);
+    println!("  4. authority: {}", payer);
+    println!("  5. payer: {}", payer);
+    println!("  6. recent_slothashes: {}", sysvar::slot_hashes::id());
+    println!("  7. system_program: {}", system_program::id());
+    println!("  8. reward_escrow: {}", reward_escrow);
+    println!("  9. token_program: {}", token_program);
+    println!(" 10. wrapped_sol_mint: {}", wrapped_sol_mint);
+    println!(" 11. program_state: {}", program_state);
+
+    let accounts = vec![
+        AccountMeta::new(*randomness_account, false),           // 0. randomness (writable)
+        AccountMeta::new_readonly(*oracle, false),              // 1. oracle
+        AccountMeta::new_readonly(*queue, false),               // 2. queue
+        AccountMeta::new(oracle_stats, false),                  // 3. stats (writable)
+        AccountMeta::new_readonly(*payer, true),                // 4. authority (signer)
+        AccountMeta::new(*payer, true),                         // 5. payer (signer, writable)
+        AccountMeta::new_readonly(sysvar::slot_hashes::id(), false), // 6. recent_slothashes
+        AccountMeta::new_readonly(system_program::id(), false), // 7. system_program
+        AccountMeta::new(reward_escrow, false),                 // 8. reward_escrow (writable)
+        AccountMeta::new_readonly(token_program, false),        // 9. token_program
+        AccountMeta::new_readonly(wrapped_sol_mint, false),     // 10. wrapped_sol_mint
+        AccountMeta::new_readonly(program_state, false),        // 11. program_state
+    ];
+
+    Ok(Instruction::new_with_bytes(*program_id, &data, accounts))
 }
 
 /// Check the status of a randomness account
