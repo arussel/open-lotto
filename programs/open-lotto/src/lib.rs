@@ -212,6 +212,24 @@ pub mod open_lotto {
 
         Ok(())
     }
+
+    /// Close the escrow token account (self-authority PDA)
+    pub fn close_escrow(ctx: Context<CloseEscrow>) -> Result<()> {
+        let escrow_seeds = &[b"escrow".as_ref(), &[ctx.bumps.escrow_token_account]];
+        let signer_seeds = &[&escrow_seeds[..]];
+
+        token::close_account(CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            token::CloseAccount {
+                account: ctx.accounts.escrow_token_account.to_account_info(),
+                destination: ctx.accounts.authority.to_account_info(),
+                authority: ctx.accounts.escrow_token_account.to_account_info(),
+            },
+            signer_seeds,
+        ))?;
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -262,6 +280,21 @@ pub struct ForceCloseAccount<'info> {
 
     #[account(mut)]
     pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseEscrow<'info> {
+    #[account(
+        mut,
+        seeds = [b"escrow"],
+        bump,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]

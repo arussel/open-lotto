@@ -115,6 +115,9 @@ enum Commands {
         #[arg(long)]
         account: String,
     },
+
+    /// Close the escrow token account (self-authority PDA)
+    CloseEscrow,
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -430,6 +433,13 @@ async fn main() -> Result<()> {
             println!("Transaction: {}", signature);
             println!("Rent recovered to: {}", payer.pubkey());
         }
+
+        Commands::CloseEscrow => {
+            let signature = call_close_escrow(&rpc_client, &payer)?;
+            println!("\n✓ Escrow token account closed!");
+            println!("Transaction: {}", signature);
+            println!("Rent recovered to: {}", payer.pubkey());
+        }
     }
 
     Ok(())
@@ -732,6 +742,36 @@ fn call_force_close_account(
     let accounts = vec![
         AccountMeta::new(*account, false),
         AccountMeta::new(payer.pubkey(), true),
+    ];
+
+    let instruction = Instruction::new_with_bytes(program_id, &data, accounts);
+
+    let recent_blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new(&[instruction], Some(&payer.pubkey()));
+    let transaction = Transaction::new(&[payer], message, recent_blockhash);
+
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+    Ok(signature.to_string())
+}
+
+/// Call the close_escrow instruction on the Open Lotto program
+fn call_close_escrow(
+    rpc_client: &RpcClient,
+    payer: &Keypair,
+) -> Result<String> {
+    let program_id = Pubkey::from_str(OPEN_LOTTO_PID)?;
+
+    // Derive escrow PDA
+    let (escrow, _bump) = Pubkey::find_program_address(&[b"escrow"], &program_id);
+
+    let discriminator = get_anchor_discriminator("close_escrow");
+    let data = discriminator.to_vec();
+
+    // CloseEscrow accounts: escrow_token_account, authority (signer), token_program
+    let accounts = vec![
+        AccountMeta::new(escrow, false),
+        AccountMeta::new(payer.pubkey(), true),
+        AccountMeta::new_readonly(spl_token::id(), false),
     ];
 
     let instruction = Instruction::new_with_bytes(program_id, &data, accounts);

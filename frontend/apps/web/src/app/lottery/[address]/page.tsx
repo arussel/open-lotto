@@ -4,9 +4,9 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
-import { OpenLottoClient, Pot, TicketWithAddress } from "@open-lotto/sdk";
-import { getPotStatus, PotStatus } from "@open-lotto/types";
-import { shortenAddress } from "@open-lotto/utils";
+import { OpenLottoClient, Pot, TicketWithAddress, PotManager } from "@open-lotto/sdk";
+import { getPotStatus, PotStatus, POT_AMOUNT } from "@open-lotto/types";
+import { shortenAddress, formatTokenAmount } from "@open-lotto/utils";
 import BN from "bn.js";
 import { CountdownDisplay } from "@/components/CountdownDisplay";
 
@@ -16,6 +16,7 @@ export default function LotteryDetailPage() {
   const { publicKey, signTransaction, signAllTransactions } = useWallet();
 
   const [pot, setPot] = useState<Pot | null>(null);
+  const [potManager, setPotManager] = useState<PotManager | null>(null);
   const [userTickets, setUserTickets] = useState<TicketWithAddress[]>([]);
   const [loading, setLoading] = useState(true);
   const [entering, setEntering] = useState(false);
@@ -36,6 +37,12 @@ export default function LotteryDetailPage() {
         const potData = await client.getPot(potAddress);
         setPot(potData);
 
+        // Fetch the PotManager to get the token mint
+        if (potData) {
+          const managerData = await client.getPotManager(potData.potManager);
+          setPotManager(managerData);
+        }
+
         if (publicKey) {
           const tickets = await client.getUserTickets(publicKey);
           // Filter tickets for this pot - you'd need to track this differently
@@ -53,7 +60,7 @@ export default function LotteryDetailPage() {
   }, [connection, publicKey, params.address]);
 
   const handleEnter = async () => {
-    if (!publicKey || !signTransaction || !signAllTransactions || !pot) return;
+    if (!publicKey || !signTransaction || !signAllTransactions || !pot || !potManager) return;
 
     try {
       setEntering(true);
@@ -65,14 +72,10 @@ export default function LotteryDetailPage() {
         network: "devnet",
       });
 
-      // You'd need to pass the correct token mint - for now using a placeholder
-      // In production, this would come from the pot manager
-      const tokenMint = new PublicKey("So11111111111111111111111111111111111111112");
-
       const txId = await client.enterTicket({
         pot: potAddress,
         potTotalParticipants: pot.totalParticipants,
-        tokenMint,
+        tokenMint: potManager.tokenMint,
       });
 
       setResult({ success: true, message: `Ticket purchased! TX: ${shortenAddress(txId)}` });
@@ -104,6 +107,7 @@ export default function LotteryDetailPage() {
   }
 
   const status = getPotStatus(pot);
+  const isPending = status === PotStatus.Pending;
   const isActive = status === PotStatus.Active;
   const isSettled = status === PotStatus.Settled;
 
@@ -119,7 +123,9 @@ export default function LotteryDetailPage() {
             <div className="flex items-center gap-4">
               <span
                 className={`px-3 py-1 rounded-full text-sm font-medium ${
-                  isActive
+                  isPending
+                    ? "bg-purple-500 text-white"
+                    : isActive
                     ? "bg-green-500 text-white"
                     : isSettled
                     ? "bg-blue-500 text-white"
@@ -128,6 +134,11 @@ export default function LotteryDetailPage() {
               >
                 {status}
               </span>
+              {isPending && (
+                <span className="text-primary-200">
+                  Starts in <CountdownDisplay endTimestamp={pot.startTimestamp} />
+                </span>
+              )}
               {isActive && (
                 <span className="text-primary-200">
                   Ends in <CountdownDisplay endTimestamp={pot.endTimestamp} />
@@ -149,7 +160,9 @@ export default function LotteryDetailPage() {
                   {isSettled ? "Winning Ticket" : "Prize Pool"}
                 </p>
                 <p className="text-3xl font-bold text-slate-800">
-                  {isSettled ? `#${pot.winningSlot.toString()}` : "?"}
+                  {isSettled
+                    ? `#${pot.winningSlot.toString()}`
+                    : formatTokenAmount(pot.totalParticipants.mul(POT_AMOUNT))}
                 </p>
               </div>
             </div>
@@ -211,7 +224,13 @@ export default function LotteryDetailPage() {
               </p>
             )}
 
-            {!isActive && (
+            {isPending && (
+              <p className="text-center text-slate-500">
+                This lottery hasn&apos;t started yet
+              </p>
+            )}
+
+            {!isActive && !isPending && (
               <p className="text-center text-slate-500">
                 This lottery has ended
               </p>

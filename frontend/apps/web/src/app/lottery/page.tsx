@@ -32,8 +32,12 @@ export default function LotteryListPage() {
 
   const filteredPots = pots.filter((pot) => {
     const status = getPotStatus(pot);
-    if (filter === "active") return status === PotStatus.Active;
-    if (filter === "ended") return status !== PotStatus.Active;
+    if (filter === "active")
+      return status === PotStatus.Active || status === PotStatus.Pending;
+    if (filter === "ended")
+      return (
+        status !== PotStatus.Active && status !== PotStatus.Pending
+      );
     return true;
   });
 

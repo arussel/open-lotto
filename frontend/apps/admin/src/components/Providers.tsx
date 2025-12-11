@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   ConnectionProvider,
   WalletProvider,
@@ -13,15 +13,23 @@ import "@solana/wallet-adapter-react-ui/styles.css";
 const NETWORK = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "https://api.devnet.solana.com";
 
 export function Providers({ children }: { children: React.ReactNode }) {
+  const [mounted, setMounted] = useState(false);
+
   const wallets = useMemo(
     () => [new PhantomWalletAdapter(), new SolflareWalletAdapter()],
     []
   );
 
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   return (
     <ConnectionProvider endpoint={NETWORK}>
       <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>{children}</WalletModalProvider>
+        <WalletModalProvider>
+          {mounted ? children : null}
+        </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
   );

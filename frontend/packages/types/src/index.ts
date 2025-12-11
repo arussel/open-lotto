@@ -81,7 +81,8 @@ export const ERROR_MESSAGES: Record<OpenLottoError, string> = {
 
 // Pot Status Helper
 export enum PotStatus {
-  Active = "active",
+  Pending = "pending", // Pot hasn't started yet
+  Active = "active", // Pot is accepting entries
   Drawing = "drawing",
   Settled = "settled",
   Closed = "closed",
@@ -89,10 +90,16 @@ export enum PotStatus {
 
 export function getPotStatus(pot: Pot): PotStatus {
   const now = Math.floor(Date.now() / 1000);
+  const startTime = pot.startTimestamp.toNumber();
   const endTime = pot.endTimestamp.toNumber();
   const hasRandomness = !pot.randomnessAccount.equals(PublicKey.default);
   const hasWinner = pot.winningSlot.toNumber() > 0;
 
+  // Pot hasn't started yet
+  if (now < startTime) {
+    return PotStatus.Pending;
+  }
+  // Pot is currently active (started but not ended)
   if (now < endTime) {
     return PotStatus.Active;
   }

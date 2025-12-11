@@ -215,11 +215,26 @@ export class OpenLottoClient {
     const [escrowTokenAccount] = deriveEscrowPDA();
     const [treasuryTokenAccount] = deriveTreasuryPDA();
 
-    // Get or create user's ATA
+    // Get user's ATA address
     const userTokenAccount = await getAssociatedTokenAddress(
       params.tokenMint,
       user
     );
+
+    const instructions: TransactionInstruction[] = [];
+
+    // Check if user's ATA exists, if not create it
+    const ataInfo = await this.connection.getAccountInfo(userTokenAccount);
+    if (!ataInfo) {
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          user, // payer
+          userTokenAccount, // ata
+          user, // owner
+          params.tokenMint // mint
+        )
+      );
+    }
 
     const discriminator = this.getDiscriminator("enter_ticket");
 
@@ -235,13 +250,15 @@ export class OpenLottoClient {
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
 
-    const instruction = new TransactionInstruction({
-      programId: PROGRAM_ID,
-      keys,
-      data: discriminator,
-    });
+    instructions.push(
+      new TransactionInstruction({
+        programId: PROGRAM_ID,
+        keys,
+        data: discriminator,
+      })
+    );
 
-    return this.sendTransaction([instruction]);
+    return this.sendTransaction(instructions);
   }
 
   async claimPrize(params: {

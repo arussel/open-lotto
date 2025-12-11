@@ -114,11 +114,15 @@ export default function TicketsPage() {
           {tickets.map((ticket) => {
             // Find the pot for this ticket (simplified - you'd need proper tracking)
             const potEntry = Array.from(pots.entries()).find(([_, pot]) =>
-              pot.winningSlot.eq(ticket.index) ||
               pot.totalParticipants.gt(ticket.index)
             );
             const pot = potEntry?.[1];
-            const isWinner = pot && pot.winningSlot.eq(ticket.index);
+            // Only mark as winner if the pot has been settled (winningSlot > 0)
+            // and the ticket index matches the winning slot
+            const isWinner =
+              pot &&
+              !pot.winningSlot.isZero() &&
+              pot.winningSlot.eq(ticket.index);
             const canClaim =
               isWinner && getPotStatus(pot) === PotStatus.Settled;
 

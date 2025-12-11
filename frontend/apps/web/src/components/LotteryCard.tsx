@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { PotWithAddress, getPotStatus, PotStatus } from "@open-lotto/sdk";
-import { shortenAddress } from "@open-lotto/utils";
+import { PotWithAddress, getPotStatus, PotStatus, POT_AMOUNT } from "@open-lotto/sdk";
+import { shortenAddress, formatTokenAmount } from "@open-lotto/utils";
 import { CountdownDisplay } from "./CountdownDisplay";
 
 export function LotteryCard({ pot }: { pot: PotWithAddress }) {
   const status = getPotStatus(pot);
 
   const statusStyles: Record<PotStatus, string> = {
+    [PotStatus.Pending]: "bg-purple-100 text-purple-800",
     [PotStatus.Active]: "bg-green-100 text-green-800",
     [PotStatus.Drawing]: "bg-yellow-100 text-yellow-800",
     [PotStatus.Settled]: "bg-blue-100 text-blue-800",
@@ -36,11 +37,20 @@ export function LotteryCard({ pot }: { pot: PotWithAddress }) {
       <div className="p-4">
         <div className="flex justify-between items-center mb-4">
           <div>
-            <p className="text-slate-500 text-sm">Participants</p>
+            <p className="text-slate-500 text-sm">Prize Pool</p>
             <p className="text-2xl font-bold text-slate-800">
-              {pot.totalParticipants.toString()}
+              {formatTokenAmount(pot.totalParticipants.mul(POT_AMOUNT))}
+            </p>
+            <p className="text-slate-400 text-xs">
+              {pot.totalParticipants.toString()} participants
             </p>
           </div>
+          {status === PotStatus.Pending && (
+            <div className="text-right">
+              <p className="text-slate-500 text-sm">Starts in</p>
+              <CountdownDisplay endTimestamp={pot.startTimestamp} />
+            </div>
+          )}
           {status === PotStatus.Active && (
             <div className="text-right">
               <p className="text-slate-500 text-sm">Ends in</p>
@@ -61,7 +71,11 @@ export function LotteryCard({ pot }: { pot: PotWithAddress }) {
           href={`/lottery/${pot.address.toBase58()}`}
           className="block w-full bg-primary-600 hover:bg-primary-700 text-white text-center font-medium py-2 rounded-lg transition-colors"
         >
-          {status === PotStatus.Active ? "Enter Now" : "View Details"}
+          {status === PotStatus.Active
+            ? "Enter Now"
+            : status === PotStatus.Pending
+              ? "Coming Soon"
+              : "View Details"}
         </Link>
       </div>
     </div>
